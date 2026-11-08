@@ -46,6 +46,8 @@ var (
 // Returns a new gotMetrics map containing the metric data being polled for, or
 // an error if failed to wait for metric.
 func waitForServerCompletedRPCs(ctx context.Context, t *testing.T, reader metric.Reader, wantMetric metricdata.Metrics) (map[string]metricdata.Metrics, error) {
+	var lastVal metricdata.Metrics
+	var haveLast bool
 	for ; ctx.Err() == nil; <-time.After(time.Millisecond) {
 		rm := &metricdata.ResourceMetrics{}
 		reader.Collect(ctx, rm)
@@ -59,11 +61,28 @@ func waitForServerCompletedRPCs(ctx context.Context, t *testing.T, reader metric
 		if !ok {
 			continue
 		}
-		metricdatatest.AssertEqual(t, wantMetric, val, metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
+		// The metric appears as soon as the first RPC's stats.End is handled
+		// server side, while a later RPC's stats.End may still be in flight;
+		// keep polling until every expected data point has been recorded
+		// instead of asserting on the first partial snapshot.
+		if !metricdatatest.AssertEqual(silentT{}, wantMetric, val, metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars()) {
+			lastVal, haveLast = val, true
+			continue
+		}
 		return gotMetrics, nil
+	}
+	if haveLast {
+		metricdatatest.AssertEqual(t, wantMetric, lastVal, metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
 	}
 	return nil, fmt.Errorf("error waiting for metric %v: %v", wantMetric, ctx.Err())
 }
+
+// silentT satisfies metricdatatest.TestingT without reporting, so a polling
+// comparison can be retried until it matches.
+type silentT struct{}
+
+func (silentT) Helper()      {}
+func (silentT) Error(...any) {}
 
 // checkDataPointWithinFiveSeconds checks if the metric passed in contains a
 // histogram with dataPoints that fall within buckets that are <=5. Returns an
